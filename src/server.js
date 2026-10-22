@@ -16,11 +16,34 @@ async function start() {
     console.log(`Yalla Class API is running on http://localhost:${env.PORT}`);
   });
 
+  let shuttingDown = false;
+
   async function shutdown(signal) {
+    if (shuttingDown) {
+      return;
+    }
+
+    shuttingDown = true;
     console.log(`\n${signal} received. Shutting down...`);
-    server.close();
-    await disconnectDatabase();
-    process.exit(0);
+
+    const forceExitTimer = setTimeout(() => {
+      console.error('Shutdown timed out. Forcing exit.');
+      process.exit(1);
+    }, 10000);
+
+    forceExitTimer.unref();
+
+    try {
+      await new Promise((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+      await disconnectDatabase();
+      clearTimeout(forceExitTimer);
+      process.exit(0);
+    } catch (error) {
+      console.error(`Error during shutdown: ${error.message}`);
+      process.exit(1);
+    }
   }
 
   process.on('SIGINT', () => shutdown('SIGINT'));
