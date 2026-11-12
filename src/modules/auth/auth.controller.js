@@ -2,16 +2,6 @@ const { sendSuccess } = require('../../utils/api-response');
 const { serializeUser } = require('../../utils/serializers');
 const authService = require('./auth.service');
 
-async function register(req, res) {
-  const result = await authService.register(req.body);
-
-  return sendSuccess(res, {
-    statusCode: 201,
-    message: 'Registration successful',
-    data: result,
-  });
-}
-
 async function login(req, res) {
   const result = await authService.login(req.body);
 
@@ -34,4 +24,4 @@ function logout(req, res) {
   });
 }
 
-module.exports = { register, login, me, logout };
+module.exports = { login, me, logout };

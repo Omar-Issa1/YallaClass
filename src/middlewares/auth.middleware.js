@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 
+const Organization = require('../models/organization.model');
 const User = require('../models/user.model');
 const AppError = require('../utils/app-error');
 const { verifyAccessToken } = require('../utils/token');
@@ -38,6 +39,18 @@ async function authenticate(req, res, next) {
 
   if (user.status === 'SUSPENDED') {
     return next(new AppError('Your account has been suspended', 403));
+  }
+
+  if (user.organization) {
+    const organization = await Organization.findById(user.organization).select('status');
+
+    if (!organization) {
+      return next(new AppError('Your organization is no longer available', 403));
+    }
+
+    if (organization.status === 'SUSPENDED') {
+      return next(new AppError('Your organization has been suspended', 403));
+    }
   }
 
   req.user = user;

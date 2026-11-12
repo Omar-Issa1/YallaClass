@@ -28,6 +28,37 @@ async function updateUserStatus(req, res) {
   });
 }
 
+async function createOrganization(req, res) {
+  const result = await adminService.createOrganization(req.body);
+
+  return sendSuccess(res, {
+    statusCode: 201,
+    message: 'Organization and owner created successfully',
+    data: result,
+  });
+}
+
+async function updateOrganization(req, res) {
+  const organization = await adminService.updateOrganization(req.params.id, req.body);
+
+  return sendSuccess(res, {
+    message: 'Organization updated successfully',
+    data: { organization },
+  });
+}
+
+async function updateOrganizationStatus(req, res) {
+  const organization = await adminService.updateOrganizationStatus(
+    req.params.id,
+    req.body.status
+  );
+
+  return sendSuccess(res, {
+    message: 'Organization status updated successfully',
+    data: { organization },
+  });
+}
+
 async function listOrganizations(req, res) {
   const organizations = await adminService.listOrganizations();
 
@@ -50,6 +81,9 @@ module.exports = {
   listUsers,
   getUser,
   updateUserStatus,
+  createOrganization,
+  updateOrganization,
+  updateOrganizationStatus,
   listOrganizations,
   getOrganization,
 };

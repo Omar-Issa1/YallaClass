@@ -1,6 +1,10 @@
+const http = require('node:http');
+
 const app = require('./app');
 const env = require('./config/env');
 const { connectDatabase, disconnectDatabase } = require('./config/database');
+const gameEngine = require('./modules/game/game.engine');
+const { createSocketServer } = require('./modules/game/game.socket');
 
 async function start() {
   try {
@@ -12,8 +16,24 @@ async function start() {
     process.exit(1);
   }
 
-  const server = app.listen(env.PORT, () => {
+  const server = http.createServer(app);
+  const io = createSocketServer(server);
+
+  try {
+    const recovery = await gameEngine.recoverSessions();
+
+    if (recovery.live > 0 || recovery.paused > 0) {
+      console.log(
+        `Recovered ${recovery.live} live session(s) and ${recovery.paused} paused session(s).`
+      );
+    }
+  } catch (error) {
+    console.error(`Could not recover live sessions: ${error.message}`);
+  }
+
+  server.listen(env.PORT, () => {
     console.log(`Yalla Class API is running on http://localhost:${env.PORT}`);
+    console.log(`Socket.IO is listening on the same server (path /socket.io).`);
   });
 
   let shuttingDown = false;
@@ -34,8 +54,16 @@ async function start() {
     forceExitTimer.unref();
 
     try {
+      await new Promise((resolve) => io.close(resolve));
       await new Promise((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
+        server.close((error) => {
+          if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') {
+            reject(error);
+            return;
+          }
+
+          resolve();
+        });
       });
       await disconnectDatabase();
       clearTimeout(forceExitTimer);

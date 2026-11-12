@@ -57,7 +57,9 @@ async function main() {
     status: 'ACTIVE',
   });
 
-  console.log(`ADMIN account created: ${admin.email} (${admin._id.toString()})`);
+  console.log(
+    `SUPER ADMIN (ADMIN role) account created: ${admin.email} (${admin._id.toString()})`
+  );
 }
 
 main()

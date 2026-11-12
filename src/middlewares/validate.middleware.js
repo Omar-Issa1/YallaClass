@@ -20,6 +20,42 @@ function validate(schema) {
   };
 }
 
+function validateQuery(schema) {
+  return function validateQueryParams(req, res, next) {
+    const result = schema.safeParse(req.query);
+
+    if (!result.success) {
+      const errors = result.error.issues.map((issue) => ({
+        field: issue.path.join('.'),
+        message: issue.message,
+      }));
+
+      return next(new AppError('Validation failed', 400, errors));
+    }
+
+    req.validatedQuery = result.data;
+    return next();
+  };
+}
+
+function validateParams(schema) {
+  return function validateRouteParams(req, res, next) {
+    const result = schema.safeParse(req.params);
+
+    if (!result.success) {
+      const errors = result.error.issues.map((issue) => ({
+        field: issue.path.join('.'),
+        message: issue.message,
+      }));
+
+      return next(new AppError('Validation failed', 400, errors));
+    }
+
+    req.validatedParams = result.data;
+    return next();
+  };
+}
+
 function validateObjectId(param = 'id') {
   return function validateParam(req, res, next) {
     if (!mongoose.isValidObjectId(req.params[param])) {
@@ -30,4 +66,4 @@ function validateObjectId(param = 'id') {
   };
 }
 
-module.exports = { validate, validateObjectId };
+module.exports = { validate, validateQuery, validateParams, validateObjectId };

@@ -14,6 +14,12 @@ const organizationSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    status: {
+      type: String,
+      enum: ['ACTIVE', 'SUSPENDED'],
+      default: 'ACTIVE',
+      index: true,
+    },
   },
   { timestamps: true }
 );

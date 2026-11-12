@@ -5,6 +5,10 @@ function normalizeError(err) {
     return { statusCode: 400, message: 'Invalid JSON body' };
   }
 
+  if (err.type === 'entity.too.large') {
+    return { statusCode: 413, message: 'Request body is too large' };
+  }
+
   if (err.name === 'ValidationError' && err.errors) {
     return {
       statusCode: 400,

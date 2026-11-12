@@ -2,7 +2,7 @@
   "name": "yalla-class-api",
   "version": "0.1.0",
   "private": true,
-  "description": "Yalla Class backend API - Phase 0 + Phase 1 (foundation, auth, organizations, admin)",
+  "description": "Yalla Class backend API - Phase 0 through Phase 9 (foundation, auth, organizations, quizzes, sections, students, avatars, sessions, lobby, join, real-time game engine, scoring, leaderboard, recovery, teacher live controls, Gift/Thief/Rocket commands, session events, attendance, reports, student history, Excel export, admin, and full end-to-end testing)",
   "main": "src/server.js",
   "type": "commonjs",
   "scripts": {
@@ -18,9 +18,14 @@
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "dotenv": "^18.0.8",
+    "exceljs": "^4.4.0",
     "express": "^5.3.0",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.11.2",
+    "socket.io": "^4.8.4",
     "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.4"
   }
 }
