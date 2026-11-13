@@ -48,11 +48,18 @@ function serializeAttendanceRecord(record) {
     accuracy: ratio(correctCount, answeredCount),
     accuracyPercentage: percentage(correctCount, answeredCount),
     score: record.score || 0,
+    gameScore: record.score || 0,
+    rawScore: record.rawScore || 0,
     bestStreak: record.bestStreak || 0,
+    academicBestStreak: record.academicBestStreak || 0,
     finalRank: record.finalRank ?? null,
     totalResponseTimeMs,
     averageResponseTimeMs:
       answeredCount > 0 ? Math.round(totalResponseTimeMs / answeredCount) : 0,
+    averageResponseTime:
+      answeredCount > 0
+        ? round(totalResponseTimeMs / answeredCount / 1000, 2)
+        : 0,
     quizTitle: record.quizTitle || '',
     sessionStartedAt: record.sessionStartedAt || null,
     sessionEndedAt: record.sessionEndedAt || null,

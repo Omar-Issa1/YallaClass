@@ -2,7 +2,7 @@
 
 Backend API for **Yalla Class**, a live classroom quiz platform for Arabic/Egyptian classrooms.
 
-**Current status: Phase 0 + Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6 + Phase 7 + Phase 8 + Phase 9 complete — Backend MVP.**
+**Current status: Phase 0 + Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6 + Phase 7 + Phase 8 + Phase 9 + Phase 10 complete — Backend MVP.**
 
 Implemented:
 
@@ -27,6 +27,8 @@ Implemented:
 - Socket.IO real-time game rooms with separate teacher and player authentication
 - Server-authoritative question lifecycle: countdown, question, answer deadline, reveal, explanation, leaderboard, and finish
 - Server-side correctness checks, response-time scoring, streaks, total scores, ranks, and final results
+- Independent academic `rawScore` and gameplay `gameScore` per participant, with teacher-configurable per-question points
+- Frontend-ready session report JSON with `sessionSummary`, `attendance`, `studentResults`, `questionAnalysis`, and `commandStatistics`
 - Live leaderboard, per-player answer results, teacher-only answer statistics, and late-player support
 - Connect/disconnect/reconnect tracking, kicking during a live game, and automatic rejoin state sync
 - Persisted game state and answers with restart recovery and idempotent scoring
@@ -38,7 +40,7 @@ Implemented:
 - Persisted `SessionCommand` state and `SessionEvent` audit records for command and teacher actions
 - Command recovery after reconnect/server restart without duplicate scoring or duplicate card effects
 - Materialized session attendance based on actual participation (50% answer threshold by default)
-- Session reports with attendance, question analysis, student analysis, and Gift/Thief/Rocket command logs
+- Session reports with attendance, question analysis, student analysis, academic/game student results, and Gift/Thief/Rocket command logs
 - Organization-scoped student attendance history with date/session/quiz/status filters and pagination
 - Excel report export with five worksheets (`Session Summary`, `Attendance`, `Student Results`, `Question Analysis`, `Commands`), Arabic-safe text, frozen headers, filters, number/date formats, formula-injection sanitization, and organization-scoped authorization
 - In-memory rate limiting for login (per IP + email) and public join lookups (per IP)
@@ -1008,7 +1010,7 @@ Rules:
 
 - `text`: required, 1-1000 characters
 - `options`: 2-4 options, exactly one must have `isCorrect: true`
-- `points`: optional integer, 0-10000, default `1000`
+- `points`: optional positive integer, 1-10000, default `1000` (base points for the question)
 - `timeLimitSec`: optional integer, 5-120, default `10`
 - `order`: optional integer >= 0; if omitted, the question is appended
 
@@ -2346,7 +2348,7 @@ The post-question sequence is fixed: **Reveal -> Explanation -> Points -> Leader
 
 ### Scoring and streaks
 
-Phase 5 uses this server-side formula:
+Phase 5 uses this server-side formula for the **game score**:
 
 ```text
 responseRatio = clamp(responseTimeMs / (timeLimitSec * 1000), 0, 1)
@@ -2358,7 +2360,7 @@ pointsAwarded = round(question.points * (1 - responseRatio * 0.5))
 - `responseTimeMs` is measured from the server-recorded `phaseStartedAt` to the server receive time.
 - A correct answer increments `streak` by 1 and updates `bestStreak`; an incorrect answer resets `streak` to 0.
 - Phase 5 has **no streak bonus**. `streak` is recorded and displayed but does not change points.
-- `score` is the sum of `pointsAwarded` across all persisted answers, plus direct score effects such as Points Bonus and Leaderboard Strike.
+- `score` is the sum of `pointsAwarded` across all persisted answers, plus direct score effects such as Points Bonus and Leaderboard Strike. In reports it is exposed as `gameScore`; the existing `score` field is kept for API compatibility.
 - `Answer.basePointsAwarded` stores the speed-based value before card effects. `Answer.doublePointsApplied` and `Answer.streakShieldApplied` record which card effects were consumed on that answer.
 - Double Points doubles `pointsAwarded` for the next answered question and is then consumed. Streak Shield preserves the current streak through one incorrect answer and is then consumed.
 - Points Bonus adds 100 score immediately. Leaderboard Strike steals up to 100 score from the player immediately above the owner, or grants the first-place owner a 100 point bonus.
@@ -2366,6 +2368,21 @@ pointsAwarded = round(question.points * (1 - responseRatio * 0.5))
 - Each player can submit at most one answer per question. Duplicates return `ALREADY_ANSWERED` and are never scored twice.
 - Answers received after `phaseEndsAt` return `DEADLINE_PASSED`.
 - Scoring updates are idempotent: an answer is applied to the player only if that question is not already in `answeredQuestions`.
+
+#### Raw score (academic score)
+
+`SessionPlayer.rawScore` is a second, independent score that is never touched by gameplay effects:
+
+```text
+rawScore = sum(question.points for every correctly answered question)
+```
+
+- A correct answer adds the **full configured base points** of that question (`Answer.rawScoreAwarded`), regardless of response speed.
+- An incorrect or unanswered question adds `0`.
+- Double Points, Gift, Points Bonus, Leaderboard Strike, Thief, Rocket, Streak Shield, and every other command affect only `score` (`gameScore`), never `rawScore`.
+- The value is calculated and persisted server-side from the session question snapshot, so editing a question after the session starts cannot change a finished session's raw score.
+- `rawScore` is incremented atomically with the answer application and is also recomputed from `Answer` records for reports, which backfills legacy answers that predate the field.
+- The academic best streak (`academicBestStreak`) is derived separately by walking the answers in question order. Unanswered questions break the consecutive-correct run, and Streak Shield does not affect it.
 
 ### Leaderboard
 
@@ -2598,9 +2615,59 @@ Behavior:
 
 #### `GET /api/sessions/:id/report`
 
+- Authentication: Bearer JWT. Allowed roles: `OWNER`, `TEACHER`, `ASSISTANT`. `ADMIN` receives `403`.
 - Only `FINISHED` sessions are reportable. Live, paused, or lobby sessions return `409`.
+- Cross-organization sessions return `404` (existence is not leaked).
 - Finalizes attendance lazily if it was never finalized (for example after a crash during finish).
-- Returns: session/quiz info, attendance counts and section summaries, overall summary, question analysis, student analysis, and command usage/log.
+- This JSON response is the **primary report contract** for the frontend. Excel export is optional and is generated from the same service, so the frontend must not depend on it.
+
+The report exposes predictable sections:
+
+| Section | Contents |
+| ------- | -------- |
+| `sessionSummary` | Session id, quiz title, join code, status, timestamps, total questions, participant counts, and attendance summary |
+| `attendance` | Finalization flag, counts, and per-section summaries |
+| `studentResults` | One row per participant (including absentees) with academic and gameplay scores and aggregate statistics |
+| `questionAnalysis` | Per-question aggregates: text, order, base points, answer counts, accuracy, response time, answer distribution |
+| `commandStatistics` | Command usage by type/status plus the command log (same value as the existing `commands` field) |
+
+Existing fields (`session`, `summary`, `studentAnalysis`, `commands`) are preserved for API compatibility. `studentResults` is the recommended frontend source.
+
+##### `studentResults` fields
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `name` | string | Roster student name, or the guest's display name |
+| `rawScore` | number | Sum of the configured base points of correctly answered questions; no speed or gameplay effects |
+| `gameScore` | number | Final gameplay score (`SessionPlayer.score`), including speed and all command effects |
+| `accuracy` | number | Percentage of correct answers, 0–100, two decimals; `0` when nothing was answered |
+| `correctAnswers` | number | Number of correct answers |
+| `incorrectAnswers` | number | Number of incorrect answers; unanswered questions are **not** counted |
+| `bestStreak` | number | Maximum consecutive correct answers in question order; unaffected by Streak Shield |
+| `averageResponseTime` | number | Average answer time in **seconds** (two decimals), answered questions only; `0` when nothing was answered |
+
+Each row also keeps `student`, `participant`, `section`, `sectionName`, `nickname`, `status`, `guest`, `rosterMissing`, `late`, `totalQuestions`, and `finalRank` for display and filtering.
+
+##### Calculation rules
+
+```text
+rawScore          = Σ question.points            (correct answers only)
+gameScore         = SessionPlayer.score          (existing speed/command formula, unchanged)
+accuracy          = correctAnswers / (correctAnswers + incorrectAnswers) * 100
+bestStreak        = max consecutive correct answers in question order
+averageResponseTime = Σ responseTimeMs / answeredCount / 1000
+```
+
+- `accuracy` is rounded to two decimals and is `0` when `correctAnswers + incorrectAnswers === 0`.
+- `averageResponseTime` is rounded to two decimals and is `0` when no question was answered. It uses only answered questions; unanswered questions are excluded from both the numerator and denominator.
+- Unanswered questions break the `bestStreak` run. An incorrect answer also breaks it.
+- `studentAnalysis[].accuracy` remains a 0–1 ratio, and `studentAnalysis[].bestStreak` remains the gameplay best streak. `studentResults[].accuracy` is a percentage and `studentResults[].bestStreak` is the academic streak. `studentAnalysis` also exposes `rawScore`, `gameScore`, `academicBestStreak`, and `averageResponseTime`.
+- Guest display names come from the participant `name`/`nickname`; token hashes and other credentials are never included.
+- Kicked, disconnected, late, and absent participants are included. Absentees have zeroed statistics.
+
+##### Frontend usage
+
+The table can be sorted client-side by `rawScore`, `gameScore`, `accuracy`, or `bestStreak` and searched by `name`/`nickname`. All values are authoritative server calculations; the frontend does not need to recalculate scores or make per-student requests.
 
 #### `GET /api/students/:id/history`
 
@@ -2645,6 +2712,28 @@ The response includes the student, applied filters, pagination, an aggregate `su
 {
   "report": {
     "generatedAt": "2026-01-01T00:00:00.000Z",
+    "sessionSummary": {
+      "sessionId": "<sessionId>",
+      "quizTitle": "Algebra Basics",
+      "joinCode": "ABC123",
+      "status": "FINISHED",
+      "startedAt": "2026-01-01T00:00:00.000Z",
+      "endedAt": "2026-01-01T00:10:00.000Z",
+      "totalQuestions": 10,
+      "totalParticipants": 26,
+      "registeredParticipants": 30,
+      "joinedParticipants": 26,
+      "attendanceSummary": {
+        "present": 25,
+        "absent": 6,
+        "kicked": 1,
+        "pending": 0,
+        "guests": 2,
+        "late": 3,
+        "attendanceRate": 0.7667,
+        "attendancePercentage": 76.67
+      }
+    },
     "session": {
       "id": "<sessionId>",
       "status": "FINISHED",
@@ -2770,6 +2859,29 @@ The response includes the student, applied filters, pagination, an aggregate `su
         }
       }
     ],
+    "studentResults": [
+      {
+        "student": "<studentId>",
+        "participant": "<participantId>",
+        "section": "<sectionId>",
+        "sectionName": "Grade 10 A",
+        "name": "Sara Ali",
+        "nickname": "sara",
+        "status": "PRESENT",
+        "guest": false,
+        "rosterMissing": false,
+        "late": false,
+        "totalQuestions": 10,
+        "rawScore": 8500,
+        "gameScore": 9800,
+        "accuracy": 90,
+        "correctAnswers": 9,
+        "incorrectAnswers": 1,
+        "bestStreak": 5,
+        "averageResponseTime": 2.8,
+        "finalRank": 1
+      }
+    ],
     "studentAnalysis": [
       {
         "student": "<studentId>",
@@ -2792,9 +2904,14 @@ The response includes the student, applied filters, pagination, an aggregate `su
         "accuracy": 0.9,
         "accuracyPercentage": 90,
         "score": 9800,
+        "gameScore": 9800,
+        "rawScore": 8500,
         "finalRank": 1,
+        "bestStreak": 5,
+        "academicBestStreak": 5,
         "totalResponseTimeMs": 28000,
         "averageResponseTimeMs": 2800,
+        "averageResponseTime": 2.8,
         "wrongQuestionCount": 1,
         "unansweredCount": 0,
         "wrongQuestions": [
@@ -2848,6 +2965,12 @@ The response includes the student, applied filters, pagination, an aggregate `su
 
 Key semantics:
 
+- `studentResults[].rawScore` is the academic score: the sum of the snapshot `question.points` for correct answers only. It is never changed by speed or commands.
+- `studentResults[].gameScore` is the existing `score` (speed formula plus gameplay effects). Both values are persisted server-side.
+- `studentResults[].accuracy` is a percentage (`90` means 90%). `studentAnalysis[].accuracy` stays a 0–1 ratio (`0.9`); `accuracyPercentage` is also provided.
+- `studentResults[].bestStreak` is the academic consecutive-correct maximum. `studentAnalysis[].bestStreak` is the gameplay streak, which Streak Shield can preserve; `academicBestStreak` is the academic value in both sections.
+- `studentResults[].averageResponseTime` is in seconds. `averageResponseTimeMs` remains in milliseconds for existing consumers. Both are `0` when no question was answered.
+- Unanswered questions are excluded from accuracy and response-time denominators and are not counted as incorrect. They do break the academic best-streak run.
 - `registeredParticipants` counts non-guest attendance records (roster students, joined or absent).
 - `joinedParticipants` counts records with a `participant` (everyone who actually joined, including guests).
 - `actualAttendees` counts `PRESENT` records only.
@@ -2855,6 +2978,7 @@ Key semantics:
 - `attendanceRate = roster present / registered` (guests excluded). `participationRate = joined / (registered + guests)`.
 - Question `skippedCount = joinedParticipants - totalAnswers` for that question.
 - `needsFollowUp` is `true` when a record is `ABSENT`, `KICKED`, has accuracy below 50%, or has unanswered questions.
+- `commandStatistics` is the same object as the legacy `commands` field.
 
 ### Student history example
 
@@ -2943,7 +3067,8 @@ History rows use the **historical section snapshot** stored at finalization. Mov
 | `guest`, `rosterMissing`, `late`, `connected` | Participation flags |
 | `joinedAt`, `leftAt`, `durationMs` | Timing |
 | `answeredCount`, `correctCount`, `totalQuestions` | Participation counts |
-| `score`, `finalRank`, `bestStreak`, `totalResponseTimeMs` | Performance snapshot |
+| `score`, `finalRank`, `bestStreak`, `totalResponseTimeMs` | Performance snapshot (`score` is the game score) |
+| `rawScore`, `academicBestStreak` | Academic score and academic consecutive-correct maximum |
 | `finalizedAt` | When the snapshot was written |
 
 `Session` gains `attendanceThreshold` (default `0.5`, range 0–1) and `attendanceFinalizedAt` (set once, used for idempotent lazy finalization).
@@ -2961,6 +3086,16 @@ History rows use the **historical section snapshot** stored at finalization. Mov
 - History `from`/`to` filter on the session end time, not the join time.
 - No email delivery or scheduled report generation (Excel download is implemented in Phase 8).
 - `Attendance` is materialized at finish time; a mid-session server crash may leave a finished session unfinalized until the next attendance/report read finalizes it lazily.
+
+### Phase 10 scoring limitations and compatibility notes
+
+- `rawScore` is persisted on new answers (`Answer.rawScoreAwarded`) and players (`SessionPlayer.rawScore`). Answers written before Phase 10 are backfilled from the session question snapshot during reconciliation; report reads also recompute the raw score from `Answer` records, so finished reports remain accurate.
+- `Attendance.rawScore` and `Attendance.academicBestStreak` are only written by Phase 10 finalization. Finalized attendance documents from older deployments hydrate to `0` when read directly through the attendance API; use the session report for authoritative recomputed values.
+- Question `points` is now validated as `1-10000` on create/update. Existing questions with `0` remain readable, but new or updated values must be at least `1`.
+- Academic best streak treats an unanswered question as a break in the consecutive-correct run. This is intentional: the sequence is defined over the full question order.
+- `averageResponseTime` is `0` (not `null`) when no question was answered, and uses answered questions only.
+- `studentResults` includes one row per attendance record, including absentees and kicked participants. It does not include per-student selected-answer history.
+- The report remains available only for `FINISHED` sessions; there is no live report endpoint.
 
 ---
 
@@ -2994,13 +3129,15 @@ The workbook is generated in memory with ExcelJS and sent directly; no temporary
 
 The export calls the same `getSessionReport()` service used by `GET /api/sessions/:id/report`, so the workbook always matches the JSON report. Organization and teacher names are loaded separately for the summary sheet.
 
+Excel is an optional convenience export. The JSON report is the primary frontend contract; the Student Results sheet mirrors `studentResults` (`Raw Score`/`Game Score` are the same values as `rawScore`/`gameScore`, and `Best Streak` is the academic streak).
+
 ### Worksheets
 
 | Sheet | Columns |
 | ----- | ------- |
 | `Session Summary` | Field, Value (organization name, quiz title, session date, teacher name, total questions, total registered participants, actual attendees, absentees, kicked participants, average accuracy, average response time, session duration) |
 | `Attendance` | Student Name, Nickname, Section, Attendance Status, Join Time, Leave Time, Participation Duration, Answered Questions, Correct Answers, Attendance Percentage |
-| `Student Results` | Student Name, Nickname, Section, Total Score, Final Rank, Correct Answers, Incorrect Answers, Accuracy Percentage, Average Response Time (ms), Best Streak |
+| `Student Results` | Student Name, Nickname, Section, Raw Score, Game Score, Final Rank, Correct Answers, Incorrect Answers, Accuracy Percentage, Average Response Time (ms), Best Streak |
 | `Question Analysis` | Question Order, Question Text, Total Answers, Correct Answers, Incorrect Answers, Correct Answer Percentage, Average Response Time (ms) |
 | `Commands` | Command Type, Actor, Target, Value / Effect, Question, Timestamp |
 
@@ -3395,7 +3532,7 @@ updatedAt     Date
 ```text
 quiz          ObjectId -> Quiz, required
 text          String, required, 1-1000 chars
-points        Number, default 1000, 0-10000
+points        Number, default 1000, 1-10000
 timeLimitSec  Number, default 10, 5-120
 order         Number, default 0, >= 0
 options       Embedded Option array, 2-4 items
@@ -3494,7 +3631,8 @@ nicknameKey           String, required, lowercase, hidden from query results
 avatar                Embedded Avatar object
 tokenHash             String, required, unique, SHA-256 participant token hash, hidden from query results
 status                ACTIVE | KICKED (default ACTIVE)
-score                 Number, default 0
+score                 Number, default 0 (gameplay score, exposed as gameScore)
+rawScore              Number, default 0 (academic score, unaffected by speed/commands)
 streak                Number, default 0
 bestStreak            Number, default 0
 answeredCount         Number, default 0
@@ -3536,6 +3674,7 @@ selectedOptionId  ObjectId, required
 isCorrect         Boolean, required
 responseTimeMs    Number, required, >= 0
 basePointsAwarded Number, default 0 (speed-based value before card effects)
+rawScoreAwarded   Number, default 0 (full question points when correct, 0 otherwise)
 pointsAwarded     Number, required, >= 0 (effective value after Double Points)
 doublePointsApplied Boolean, default false
 streakShieldApplied Boolean, default false
@@ -3621,8 +3760,11 @@ durationMs           Number, default 0
 answeredCount        Number, default 0
 correctCount         Number, default 0
 totalQuestions       Number, default 0
-score                Number, default 0
+score                Number, default 0 (gameplay score)
+rawScore             Number, default 0 (academic score)
 finalRank            Number | null
+bestStreak           Number, default 0 (gameplay best streak)
+academicBestStreak   Number, default 0 (academic consecutive-correct maximum)
 totalResponseTimeMs  Number, default 0
 finalizedAt          Date | null
 createdAt            Date
@@ -3665,13 +3807,14 @@ This script:
 - starts the API on port `4100`
 - uses the isolated database `yalla_class_smoke` (override with `SMOKE_MONGODB_URI`)
 - creates a temporary SUPER ADMIN account
-- runs **1205 checks** covering login, JWT validation, suspended users, role authorization, organization isolation, member management, admin endpoints, quiz/question CRUD, search, archive/unarchive, duplication, section/student CRUD, section deletion guards, student search/filter/move/import, avatar validation, session creation, game code uniqueness, lifecycle transitions, lobby listing, kicking, join locking, public join/reconnect, duplicate nickname/student blocking, closed/paused/finished join blocking, cross-organization blocking, invalid/oversized bodies, invalid IDs, password leakage, and login/join rate limiting
+- runs **1253 checks** covering login, JWT validation, suspended users, role authorization, organization isolation, member management, admin endpoints, quiz/question CRUD, search, archive/unarchive, duplication, section/student CRUD, section deletion guards, student search/filter/move/import, avatar validation, session creation, game code uniqueness, lifecycle transitions, lobby listing, kicking, join locking, public join/reconnect, duplicate nickname/student blocking, closed/paused/finished join blocking, cross-organization blocking, invalid/oversized bodies, invalid IDs, password leakage, and login/join rate limiting
 - provisioning checks cover removal of public registration, SUPER ADMIN organization + `OWNER` creation, ownership linking, duplicate-email rejection, rollback on partial creation failure, organization rename/suspend/reactivate, non-admin provisioning rejection, and `OWNER`/`ADMIN` role rejection in member management
 - Phase 5 checks cover Socket.IO teacher/player authentication, assistant/player control rejection, game start/countdown, question payload hiding correct answers, correct/incorrect scoring, client score spoofing, duplicate answers, answer deadlines, early question end, streaks and best streaks, leaderboard ordering and ties, reveal/explanation/leaderboard events, pause/resume with remaining time, player disconnect/reconnect, late joining, kicking during a live game, automatic completion, persisted final ranks, server restart recovery, and cleanup of stale `connected` flags after a crash/restart
 - Phase 6 checks cover teacher live controls, permissions, command settings, phase settings, Gift/Thief/Rocket rules, card effects and rarity, target eligibility, timeouts, queue ordering, disconnect behavior, duplicate execution prevention, and `SessionEvent` records
 - Phase 7 checks cover attendance finalization, the 50% answered-question rule, present/absent/kicked/guest/missing-roster cases, late joins, join/leave timing and duration, historical section snapshots, duplicate prevention and idempotent re-finalization, absentee upgrades, live and paused sessions, report calculations (attendance, accuracy, scores, ranks, response time, hardest question, answer distribution, follow-up flags, section summaries, command usage/log), student history filters and pagination, and cross-organization/permission blocking
 - Phase 8 checks cover valid XLSX generation, all five worksheets and headers, Arabic text preservation, empty sheets, guest participants, missing roster records, JSON-report consistency, command records, response headers, safe filenames, invalid/missing session ids, unfinished sessions, unauthorized/cross-organization access, and formula-injection protection
 - Phase 9 runs a full product journey: CLI SUPER ADMIN provisioning, admin login, organization + `OWNER` creation, `OWNER` login, `TEACHER`/`ASSISTANT` creation, section/students, quiz/questions, live session, public joins (student + guest), Socket.IO start/pause/resume/answers, streak and leaderboard checks, a real Gift unlock, explicit finish, persisted ranks, finalized attendance, JSON report, Excel export, workbook-to-report consistency, and admin rename/suspend/reactivate
+- Phase 10 checks cover configurable question points (create/update/default/invalid/snapshot), raw-score rules (full base points, incorrect/unanswered zero, speed independence, Double Points/Gift/Leaderboard Strike/Thief/Rocket isolation), game-score preservation, academic vs gameplay best streak, attendance persistence, the `studentResults` report contract, guest/kicked/absent statistics, token-hash non-exposure, question base points, `commandStatistics`, Excel/JSON consistency, and report authorization/finished-session restrictions
 - stops the server and drops the test database
 
 MongoDB must be running.
@@ -4027,7 +4170,7 @@ Failed cases to verify manually:
 
 ---
 
-## Implementation Assumptions (Phases 1–9)
+## Implementation Assumptions (Phases 1–10)
 
 1. Organization `PATCH` is owner-only, while all organization members can read organization details and the member list.
 2. Member creation creates an active account immediately with a temporary password supplied by the owner. There is no email invitation flow yet.
@@ -4099,6 +4242,10 @@ Failed cases to verify manually:
 68. Rate limiting is an in-process fixed-window map. It is sufficient for a single-instance MVP; a multi-instance deployment needs a shared store and a proxy-aware `req.ip` configuration.
 69. `CORS_ORIGIN` defaults to `*` for local development. Production deployments should list explicit frontend origins.
 70. Report exports and JSON reports are read-only snapshots; they do not support editing, annotations, or manual attendance overrides.
+71. Question `points` is a positive integer from `1` to `10000`, defaulting to `1000`. It is the base value for both the speed-based game score and the academic raw score.
+72. Raw score is the sum of the session question-snapshot points for correct answers only. It is independent of response speed, Double Points, Gift, Points Bonus, Leaderboard Strike, Thief, Rocket, and Streak Shield.
+73. The report's academic `bestStreak` walks the answers in question order. Unanswered and incorrect answers both break the run; gameplay Streak Shield only protects the separate gameplay `bestStreak`.
+74. `studentResults[].accuracy` is a percentage rounded to two decimals and is `0` when no question was answered. `averageResponseTime` is in seconds rounded to two decimals, uses answered questions only, and is `0` when no question was answered. Unanswered questions are never counted as incorrect.
 
 ---
 

@@ -4714,7 +4714,8 @@ async function runPhase8Tests({
       'Student Name',
       'Nickname',
       'Section',
-      'Total Score',
+      'Raw Score',
+      'Game Score',
       'Final Rank',
       'Correct Answers',
       'Incorrect Answers',
@@ -5304,16 +5305,17 @@ async function runPhase8Tests({
   const presentResultRow = resultsByNickname.get(`present-player-${suffix}`);
   check(
     presentResultRow[3] === 2000 &&
-      presentResultRow[4] === 1 &&
-      presentResultRow[5] === 2 &&
-      presentResultRow[6] === 0,
-    'student results sheet exports score, rank, and answer counts'
+      presentResultRow[4] === 2000 &&
+      presentResultRow[5] === 1 &&
+      presentResultRow[6] === 2 &&
+      presentResultRow[7] === 0,
+    'student results sheet exports raw score, game score, rank, and answer counts'
   );
   check(
-    presentResultRow[7] === 100 &&
-      presentResultRow[8] === 200 &&
-      presentResultRow[9] === 2,
-    'student results sheet exports accuracy, response time, and best streak'
+    presentResultRow[8] === 100 &&
+      presentResultRow[9] === 200 &&
+      presentResultRow[10] === 2,
+    'student results sheet exports accuracy, response time, and academic best streak'
   );
 
   const questionSheet = workbook.getWorksheet('Question Analysis');
@@ -5408,12 +5410,13 @@ async function runPhase8Tests({
     (record) => record.participant === presentPlayer._id.toString()
   );
   check(
-    presentResultRow[3] === reportPresent.score &&
-      presentResultRow[4] === reportPresent.finalRank &&
-      presentResultRow[5] === reportPresent.correctCount &&
-      presentResultRow[6] === reportPresent.incorrectCount &&
-      presentResultRow[7] === reportPresent.accuracyPercentage &&
-      presentResultRow[9] === reportPresent.bestStreak,
+    presentResultRow[3] === reportPresent.rawScore &&
+      presentResultRow[4] === reportPresent.gameScore &&
+      presentResultRow[5] === reportPresent.finalRank &&
+      presentResultRow[6] === reportPresent.correctCount &&
+      presentResultRow[7] === reportPresent.incorrectCount &&
+      presentResultRow[8] === reportPresent.accuracyPercentage &&
+      presentResultRow[10] === reportPresent.academicBestStreak,
     'student results sheet matches the JSON student analysis'
   );
   check(
@@ -6312,12 +6315,16 @@ async function runPhase9E2ETests({ suffix }) {
   const p1ResultRow = resultsRows.find(
     (row) => String(row[1]) === p1Nickname
   );
+  const p1ReportAnalysis = report.studentAnalysis.find(
+    (student) => student.participant === p1Id
+  );
   check(
     Boolean(p1ResultRow) &&
-      p1ResultRow[3] === p1Doc.score &&
-      p1ResultRow[4] === 1 &&
-      p1ResultRow[9] === 2,
-    'exported result row contains the final score, rank, and best streak'
+      p1ResultRow[3] === p1ReportAnalysis.rawScore &&
+      p1ResultRow[4] === p1Doc.score &&
+      p1ResultRow[5] === 1 &&
+      p1ResultRow[10] === 2,
+    'exported result row contains raw score, game score, rank, and best streak'
   );
 
   const p1AttendanceRow = attendanceRows.find(
@@ -6389,6 +6396,636 @@ async function runPhase9E2ETests({ suffix }) {
   closeSocket(teacherSocket);
   closeSocket(p1.socket);
   closeSocket(guest.socket);
+}
+
+async function runFinalScoringTests({
+  suffix,
+  tokenA,
+  tokenB,
+  tokenTeacher,
+  tokenAssistant,
+  tokenAdmin,
+  orgAId,
+  orgBId,
+  teacherId,
+}) {
+  console.log('\nFinal scoring + frontend report smoke tests\n');
+
+  // 1. Per-question points are configurable through the public API.
+  const quizResponse = await request('POST', '/quizzes', {
+    token: tokenTeacher,
+    body: { title: `Final Scoring Quiz ${suffix}` },
+  });
+  const quizBody = expectStatus(
+    quizResponse,
+    201,
+    'POST /quizzes for scoring'
+  );
+  const quizId = quizBody.data.quiz.id;
+
+  function questionBody(label, points) {
+    const body = {
+      text: `Scoring ${label} ${suffix}`,
+      timeLimitSec: 10,
+      options: [
+        { text: 'Correct', isCorrect: true },
+        { text: 'Wrong', isCorrect: false },
+      ],
+    };
+
+    if (points !== undefined) {
+      body.points = points;
+    }
+
+    return body;
+  }
+
+  async function createQuestion(label, points) {
+    const response = await request(
+      'POST',
+      `/quizzes/${quizId}/questions`,
+      {
+        token: tokenTeacher,
+        body: questionBody(label, points),
+      }
+    );
+    const parsed = expectStatus(
+      response,
+      201,
+      `POST question with ${label} points`
+    );
+
+    return parsed.data.question;
+  }
+
+  const q400 = await createQuestion('400', 400);
+  const q500 = await createQuestion('500', 500);
+  const q300 = await createQuestion('300', 300);
+  const qDefault = await createQuestion('default', undefined);
+
+  check(
+    q400.points === 400 &&
+      q500.points === 500 &&
+      q300.points === 300,
+    'teachers can configure different question point values'
+  );
+  check(
+    qDefault.points === 1000,
+    'omitting points uses the 1000-point default'
+  );
+
+  const updatePoints = await request(
+    'PATCH',
+    `/quizzes/${quizId}/questions/${q400.id}`,
+    { token: tokenTeacher, body: { points: 400 } }
+  );
+  const updatePointsBody = expectStatus(
+    updatePoints,
+    200,
+    'PATCH question points'
+  );
+  check(
+    updatePointsBody.data.question.points === 400,
+    'teachers can update question points'
+  );
+
+  for (const [points, label] of [
+    [0, 'zero'],
+    [10001, 'above the maximum'],
+    [100.5, 'fractional'],
+  ]) {
+    const invalid = await request(
+      'POST',
+      `/quizzes/${quizId}/questions`,
+      {
+        token: tokenTeacher,
+        body: questionBody(label, points),
+      }
+    );
+    expectStatus(invalid, 400, `question points reject ${label} values`);
+  }
+
+  // Legacy documents written without a points field hydrate with the default.
+  await Question.collection.insertOne({
+    quiz: new mongoose.Types.ObjectId(quizId),
+    text: `Legacy question without points ${suffix}`,
+    timeLimitSec: 10,
+    order: 99,
+    options: [],
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+  const legacyQuestion = await Question.findOne({
+    text: `Legacy question without points ${suffix}`,
+  });
+  check(
+    legacyQuestion.points === 1000,
+    'existing questions without points receive the default value'
+  );
+  await Question.deleteOne({ _id: legacyQuestion._id });
+
+  // 2. Starting a session snapshots the configured points.
+  const snapshotSessionResponse = await request('POST', '/sessions', {
+    token: tokenTeacher,
+    body: { quiz: quizId },
+  });
+  const snapshotSessionBody = expectStatus(
+    snapshotSessionResponse,
+    201,
+    'POST /sessions for point snapshot'
+  );
+  const snapshotSessionId = snapshotSessionBody.data.session.id;
+  const startSnapshotSession = await request(
+    'POST',
+    `/sessions/${snapshotSessionId}/start`,
+    { token: tokenTeacher }
+  );
+  expectStatus(
+    startSnapshotSession,
+    200,
+    'start session for point snapshot'
+  );
+  const snapshotSession = await Session.findById(snapshotSessionId);
+  check(
+    JSON.stringify(
+      snapshotSession.gameQuestions.map((question) => question.points)
+    ) === JSON.stringify([400, 500, 300, 1000]),
+    'session question snapshots preserve configured base points'
+  );
+  const finishSnapshotSession = await request(
+    'POST',
+    `/sessions/${snapshotSessionId}/finish`,
+    { token: tokenTeacher }
+  );
+  expectStatus(
+    finishSnapshotSession,
+    200,
+    'finish the point snapshot session'
+  );
+
+  // 3. Deterministic raw/game scoring fixture.
+  await Student.deleteMany({ organization: orgAId });
+
+  const section = await Section.create({
+    name: `Final Scoring Section ${suffix}`,
+    organization: orgAId,
+    createdBy: teacherId,
+  });
+  const s1 = await Student.create({
+    name: `Academic One ${suffix}`,
+    nickname: `academic-one-${suffix}`,
+    organization: orgAId,
+    section: section._id,
+  });
+  const s3 = await Student.create({
+    name: `Kicked Three ${suffix}`,
+    nickname: `kicked-three-${suffix}`,
+    organization: orgAId,
+    section: section._id,
+  });
+  const s4 = await Student.create({
+    name: `Absent Four ${suffix}`,
+    nickname: `absent-four-${suffix}`,
+    organization: orgAId,
+    section: section._id,
+  });
+
+  function snapshotFromQuestion(question, order) {
+    return {
+      question: new mongoose.Types.ObjectId(question.id),
+      text: question.text,
+      points: question.points,
+      timeLimitSec: question.timeLimitSec,
+      order,
+      explanation: null,
+      options: question.options.map((option) => ({
+        optionId: new mongoose.Types.ObjectId(option.id),
+        text: option.text,
+        isCorrect: option.isCorrect,
+      })),
+    };
+  }
+
+  const snapshots = [q400, q500, q300, qDefault].map(
+    (question, index) => snapshotFromQuestion(question, index)
+  );
+  const startedAt = new Date(Date.now() - 120000);
+  const session = await Session.create({
+    quiz: new mongoose.Types.ObjectId(quizId),
+    organization: orgAId,
+    createdBy: teacherId,
+    joinCode: generateJoinCode(),
+    status: 'LIVE',
+    joinOpen: false,
+    gameState: 'QUESTION',
+    gameQuestions: snapshots,
+    currentQuestionIndex: 0,
+    startedAt,
+    phaseStartedAt: new Date(),
+    phaseEndsAt: new Date(Date.now() + 60000),
+    attendanceThreshold: 0.5,
+  });
+
+  async function createPlayer({
+    student = null,
+    name,
+    nickname,
+    joinedAt = new Date(),
+    connected = false,
+  }) {
+    return SessionPlayer.create({
+      session: session._id,
+      organization: orgAId,
+      student: student ? student._id : null,
+      section: student ? section._id : null,
+      name,
+      nickname,
+      nicknameKey: nickname.toLowerCase(),
+      tokenHash: hashParticipantToken(
+        `final-scoring-${nickname}-${Math.random()}`
+      ),
+      status: 'ACTIVE',
+      connected,
+      joinedAt,
+      lastSeenAt: new Date(),
+    });
+  }
+
+  const p1 = await createPlayer({
+    student: s1,
+    name: s1.name,
+    nickname: `academic-one-${suffix}`,
+    joinedAt: new Date(startedAt.getTime() - 60000),
+  });
+  const guestName = `Guest Zero ${suffix}`;
+  const p2 = await createPlayer({
+    name: guestName,
+    nickname: `guest-zero-${suffix}`,
+    joinedAt: new Date(startedAt.getTime() - 30000),
+  });
+  const p3 = await createPlayer({
+    student: s3,
+    name: s3.name,
+    nickname: `kicked-three-${suffix}`,
+    joinedAt: new Date(startedAt.getTime() - 20000),
+  });
+
+  async function moveToQuestion(index, offsetMs) {
+    await Session.updateOne(
+      { _id: session._id },
+      {
+        $set: {
+          status: 'LIVE',
+          gameState: 'QUESTION',
+          currentQuestionIndex: index,
+          phaseStartedAt: new Date(Date.now() - offsetMs),
+          phaseEndsAt: new Date(Date.now() + 60000),
+        },
+      }
+    );
+  }
+
+  await moveToQuestion(0, 9000);
+  await gameEngine.submitAnswer(p1._id, {
+    questionId: q400.id,
+    optionId: q400.options.find((option) => option.isCorrect).id,
+  });
+  await Session.updateOne(
+    { _id: session._id },
+    { $set: { phaseStartedAt: new Date(Date.now() - 2000) } }
+  );
+  await gameEngine.submitAnswer(p3._id, {
+    questionId: q400.id,
+    optionId: q400.options.find((option) => option.isCorrect).id,
+  });
+  await SessionPlayer.updateOne(
+    { _id: p3._id },
+    { $set: { status: 'KICKED', kickedAt: new Date() } }
+  );
+
+  await moveToQuestion(1, 1000);
+  await SessionPlayer.updateOne(
+    { _id: p1._id },
+    { $set: { doublePointsActive: true } }
+  );
+  await gameEngine.submitAnswer(p1._id, {
+    questionId: q500.id,
+    optionId: q500.options.find((option) => option.isCorrect).id,
+  });
+
+  await moveToQuestion(2, 1000);
+  await SessionPlayer.updateOne(
+    { _id: p1._id },
+    { $set: { streakShieldActive: true } }
+  );
+  await gameEngine.submitAnswer(p1._id, {
+    questionId: q300.id,
+    optionId: q300.options.find((option) => !option.isCorrect).id,
+  });
+
+  await moveToQuestion(3, 1000);
+  await gameEngine.submitAnswer(p1._id, {
+    questionId: qDefault.id,
+    optionId: qDefault.options.find((option) => option.isCorrect).id,
+  });
+
+  const p1Answers = await Answer.find({ sessionPlayer: p1._id }).sort({
+    createdAt: 1,
+  });
+  const p1AfterAnswers = await SessionPlayer.findById(p1._id);
+  const p3AfterAnswers = await SessionPlayer.findById(p3._id);
+
+  check(
+    p1AfterAnswers.rawScore === 1900,
+    'correct answers add the full configured base points to raw score'
+  );
+  check(
+    p1AfterAnswers.rawScore ===
+      p1Answers.reduce(
+        (sum, answer) => sum + (answer.rawScoreAwarded || 0),
+        0
+      ),
+    'raw score is the sum of per-answer raw awards'
+  );
+  check(
+    p1Answers.find(
+      (answer) => answer.question.toString() === q300.id
+    ).rawScoreAwarded === 0,
+    'incorrect answers add zero to raw score'
+  );
+  check(
+    p3AfterAnswers.rawScore === 400 &&
+      p2.rawScore === 0,
+    'unanswered questions add zero to raw score'
+  );
+  check(
+    p1Answers.find(
+      (answer) => answer.question.toString() === q400.id
+    ).rawScoreAwarded === 400,
+    'slow answers still award the full raw points'
+  );
+
+  // Gameplay bonuses and commands must only touch the game score.
+  await SessionPlayer.updateOne(
+    { _id: p1._id },
+    { $inc: { score: 300 } }
+  );
+  await SessionPlayer.updateOne(
+    { _id: p1._id },
+    { $inc: { score: 150 } }
+  );
+  await SessionPlayer.updateOne(
+    { _id: p1._id },
+    { $inc: { score: -100 } }
+  );
+  await SessionPlayer.updateOne(
+    { _id: p3._id },
+    { $set: { score: 0, streak: 0 } }
+  );
+  const p1AfterCommands = await SessionPlayer.findById(p1._id);
+  const p3AfterRocket = await SessionPlayer.findById(p3._id);
+
+  check(
+    p1AfterCommands.rawScore === 1900,
+    'Gift, Leaderboard Strike, and Thief never change raw score'
+  );
+  check(
+    p3AfterRocket.rawScore === 400 && p3AfterRocket.score === 0,
+    'Rocket never changes raw score'
+  );
+  check(
+    p1AfterCommands.score === p1AfterAnswers.score + 350,
+    'gameplay bonuses and penalties still change the game score'
+  );
+  check(
+    p1AfterCommands.bestStreak === 3,
+    'gameplay best streak still benefits from the streak shield'
+  );
+
+  // 4. Finishing persists attendance and the academic snapshot.
+  await gameEngine.finishGame(await Session.findById(session._id));
+
+  const p1Attendance = await Attendance.findOne({
+    session: session._id,
+    participant: p1._id,
+  });
+  const p3Attendance = await Attendance.findOne({
+    session: session._id,
+    participant: p3._id,
+  });
+  check(
+    p1Attendance.rawScore === 1900,
+    'attendance finalization persists the raw score'
+  );
+  check(
+    p1Attendance.academicBestStreak === 2 &&
+      p1Attendance.bestStreak === 3,
+    'academic best streak ignores gameplay streak shields'
+  );
+  check(
+    p3Attendance.rawScore === 400 && p3Attendance.status === 'KICKED',
+    'kicked participants keep their academic score snapshot'
+  );
+
+  // 5. Frontend-ready report contract.
+  const reportResponse = await request(
+    'GET',
+    `/sessions/${session._id}/report`,
+    { token: tokenAssistant }
+  );
+  const reportBody = expectStatus(
+    reportResponse,
+    200,
+    'ASSISTANT retrieves the frontend report'
+  );
+  const report = reportBody.data.report;
+
+  check(
+    Boolean(report.sessionSummary) &&
+      Array.isArray(report.studentResults) &&
+      Boolean(report.attendance) &&
+      Array.isArray(report.questionAnalysis) &&
+      Boolean(report.commandStatistics),
+    'report exposes the frontend-ready sections'
+  );
+  check(
+    report.sessionSummary.sessionId === session._id.toString() &&
+      report.sessionSummary.joinCode === session.joinCode &&
+      report.sessionSummary.status === 'FINISHED' &&
+      report.sessionSummary.totalQuestions === 4 &&
+      report.sessionSummary.totalParticipants === 3,
+    'session summary exposes the session identity and counts'
+  );
+  check(
+    report.studentResults.length === 4,
+    'student results include joined, guest, kicked, and absent participants'
+  );
+
+  const p1Result = report.studentResults.find(
+    (student) => student.participant === p1._id.toString()
+  );
+  const p2Result = report.studentResults.find(
+    (student) => student.participant === p2._id.toString()
+  );
+  const p3Result = report.studentResults.find(
+    (student) => student.participant === p3._id.toString()
+  );
+  const p4Result = report.studentResults.find(
+    (student) => student.student === s4._id.toString()
+  );
+
+  const p1ExpectedAverage = Math.round(
+    (p1Answers.reduce(
+      (sum, answer) => sum + answer.responseTimeMs,
+      0
+    ) /
+      p1Answers.length /
+      1000) *
+      100
+  ) / 100;
+
+  check(
+    p1Result.name === s1.name &&
+      p1Result.rawScore === 1900 &&
+      p1Result.gameScore === p1AfterCommands.score,
+    'student result exposes the academic name, raw score, and game score'
+  );
+  check(
+    p1Result.accuracy === 75 &&
+      p1Result.correctAnswers === 3 &&
+      p1Result.incorrectAnswers === 1,
+    'student result exposes accuracy and correct/incorrect counts'
+  );
+  check(
+    p1Result.bestStreak === 2,
+    'student result exposes the academic best streak'
+  );
+  check(
+    p1Result.averageResponseTime === p1ExpectedAverage,
+    'average response time uses answered questions and seconds'
+  );
+  check(
+    p2Result.name === guestName &&
+      p2Result.guest === true &&
+      p2Result.rawScore === 0 &&
+      p2Result.gameScore === 0 &&
+      p2Result.accuracy === 0 &&
+      p2Result.correctAnswers === 0 &&
+      p2Result.incorrectAnswers === 0 &&
+      p2Result.bestStreak === 0 &&
+      p2Result.averageResponseTime === 0,
+    'guest participants with no answers receive consistent zero statistics'
+  );
+  check(
+    p3Result.status === 'KICKED' &&
+      p3Result.rawScore === 400 &&
+      p3Result.gameScore === 0 &&
+      p3Result.accuracy === 100 &&
+      p3Result.bestStreak === 1,
+    'kicked participants keep their academic statistics'
+  );
+  check(
+    p4Result.status === 'ABSENT' &&
+      p4Result.rawScore === 0 &&
+      p4Result.gameScore === 0 &&
+      p4Result.accuracy === 0,
+    'roster absentees appear with zero statistics'
+  );
+  check(
+    !JSON.stringify(report.studentResults)
+      .toLowerCase()
+      .includes('tokenhash'),
+    'student results do not expose participant token hashes'
+  );
+  check(
+    JSON.stringify(
+      report.questionAnalysis.map((question) => question.points)
+    ) === JSON.stringify([400, 500, 300, 1000]),
+    'question analysis exposes configured base points'
+  );
+  check(
+    report.commandStatistics.total === report.commands.total,
+    'commandStatistics mirrors the existing command report'
+  );
+
+  // 6. Excel stays consistent with the JSON report.
+  const exportResponse = await requestBuffer(
+    'GET',
+    `/sessions/${session._id}/report/export`,
+    { token: tokenAssistant }
+  );
+  check(
+    exportResponse.status === 200,
+    'Excel export remains available for the scoring report'
+  );
+
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(exportResponse.buffer);
+  const resultsSheet = workbook.getWorksheet('Student Results');
+  const resultRows = [];
+
+  resultsSheet.eachRow((row, rowNumber) => {
+    if (rowNumber > 1) {
+      resultRows.push(row.values.slice(1));
+    }
+  });
+
+  const p1ExcelRow = resultRows.find(
+    (row) => String(row[1]) === `academic-one-${suffix}`
+  );
+  check(
+    Boolean(p1ExcelRow) &&
+      p1ExcelRow[3] === p1Result.rawScore &&
+      p1ExcelRow[4] === p1Result.gameScore &&
+      p1ExcelRow[8] === p1Result.accuracy &&
+      p1ExcelRow[10] === p1Result.bestStreak,
+    'Excel raw score, game score, accuracy, and best streak match JSON'
+  );
+
+  // 7. Authorization and finished-session restrictions.
+  const adminReport = await request(
+    'GET',
+    `/sessions/${session._id}/report`,
+    { token: tokenAdmin }
+  );
+  expectStatus(
+    adminReport,
+    403,
+    'ADMIN cannot read the student results report'
+  );
+
+  const crossOrgReport = await request(
+    'GET',
+    `/sessions/${session._id}/report`,
+    { token: tokenB }
+  );
+  expectStatus(
+    crossOrgReport,
+    404,
+    'cross-organization report access returns 404'
+  );
+
+  const lobbySession = await Session.create({
+    quiz: new mongoose.Types.ObjectId(quizId),
+    organization: orgAId,
+    createdBy: teacherId,
+    joinCode: generateJoinCode(),
+    status: 'LOBBY',
+    joinOpen: true,
+    gameState: 'IDLE',
+    gameQuestions: snapshots,
+    currentQuestionIndex: -1,
+  });
+  const unfinishedReport = await request(
+    'GET',
+    `/sessions/${lobbySession._id}/report`,
+    { token: tokenTeacher }
+  );
+  expectStatus(
+    unfinishedReport,
+    409,
+    'student results are restricted to finished sessions'
+  );
 }
 
 async function runTests(adminEmail, adminPassword) {
@@ -8375,6 +9012,18 @@ async function runTests(adminEmail, adminPassword) {
   });
 
   await runPhase9E2ETests({ suffix });
+
+  await runFinalScoringTests({
+    suffix,
+    tokenA,
+    tokenB,
+    tokenTeacher,
+    tokenAssistant,
+    tokenAdmin,
+    orgAId,
+    orgBId,
+    teacherId,
+  });
 
   const deleteTeacher = await request('DELETE', `/organization/members/${teacherId}`, {
     token: tokenA,

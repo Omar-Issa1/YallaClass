@@ -16,7 +16,7 @@ const optionsSchema = z
 const createQuestionSchema = z.strictObject({
   text: z.string().trim().min(1, 'Question text is required').max(1000),
   options: optionsSchema,
-  points: z.number().int().min(0).max(10000).optional().default(1000),
+  points: z.number().int().min(1).max(10000).optional().default(1000),
   timeLimitSec: z.number().int().min(5).max(120).optional().default(10),
   order: z.number().int().min(0).optional(),
 });
@@ -25,7 +25,7 @@ const updateQuestionSchema = z
   .strictObject({
     text: z.string().trim().min(1, 'Question text is required').max(1000).optional(),
     options: optionsSchema.optional(),
-    points: z.number().int().min(0).max(10000).optional(),
+    points: z.number().int().min(1).max(10000).optional(),
     timeLimitSec: z.number().int().min(5).max(120).optional(),
     order: z.number().int().min(0).optional(),
   })

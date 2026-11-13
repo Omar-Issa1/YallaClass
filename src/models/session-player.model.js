@@ -69,6 +69,13 @@ const sessionPlayerSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    // Academic score: sum of the configured base points of correctly answered
+    // questions. Gameplay bonuses and commands never touch this field.
+    rawScore: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     streak: {
       type: Number,
       default: 0,

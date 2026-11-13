@@ -253,6 +253,12 @@ async function applyAnswerToPlayer(answer) {
         score: {
           $add: [{ $ifNull: ['$score', 0] }, answer.pointsAwarded || 0],
         },
+        rawScore: {
+          $add: [
+            { $ifNull: ['$rawScore', 0] },
+            answer.rawScoreAwarded || 0,
+          ],
+        },
         answeredCount: {
           $add: [{ $ifNull: ['$answeredCount', 0] }, 1],
         },
@@ -304,6 +310,23 @@ async function reconcileUnappliedAnswers() {
 
   for (const answer of answers) {
     try {
+      // Answers created before raw scores existed have no stored award. Derive
+      // it from the session snapshot so reconciliation stays accurate.
+      if (answer.isCorrect && !answer.rawScoreAwarded) {
+        const session = await Session.findById(answer.session);
+
+        if (session) {
+          const question = (session.gameQuestions || []).find(
+            (item) =>
+              item.question.toString() === answer.question.toString()
+          );
+
+          if (question) {
+            answer.rawScoreAwarded = question.points || 0;
+          }
+        }
+      }
+
       const player = await applyAnswerToPlayer(answer);
 
       answer.applied = true;
@@ -1266,6 +1289,7 @@ async function submitAnswer(participantId, payload = {}) {
       responseTimeMs,
       pointsAwarded,
       basePointsAwarded,
+      rawScoreAwarded: isCorrect ? question.points || 0 : 0,
       doublePointsApplied,
       streakShieldApplied,
       applied: false,

@@ -224,13 +224,14 @@ function buildResultRows(report) {
     name: sanitizeCellText(record.name || ''),
     nickname: sanitizeCellText(record.nickname || ''),
     section: sanitizeCellText(record.sectionName || ''),
-    score: record.score || 0,
+    rawScore: record.rawScore || 0,
+    gameScore: record.gameScore ?? record.score ?? 0,
     finalRank: record.finalRank ?? '',
     correctCount: record.correctCount || 0,
     incorrectCount: record.incorrectCount || 0,
     accuracyPercentage: record.accuracyPercentage || 0,
     averageResponseTimeMs: record.averageResponseTimeMs || 0,
-    bestStreak: record.bestStreak || 0,
+    bestStreak: record.academicBestStreak ?? record.bestStreak ?? 0,
   }));
 }
 
@@ -239,7 +240,8 @@ function addResultsSheet(workbook, report) {
     { header: 'Student Name', key: 'name', width: 30 },
     { header: 'Nickname', key: 'nickname', width: 22 },
     { header: 'Section', key: 'section', width: 24 },
-    { header: 'Total Score', key: 'score', width: 14 },
+    { header: 'Raw Score', key: 'rawScore', width: 14 },
+    { header: 'Game Score', key: 'gameScore', width: 14 },
     { header: 'Final Rank', key: 'finalRank', width: 12 },
     { header: 'Correct Answers', key: 'correctCount', width: 18 },
     { header: 'Incorrect Answers', key: 'incorrectCount', width: 18 },
@@ -250,12 +252,13 @@ function addResultsSheet(workbook, report) {
 
   worksheet.addRows(buildResultRows(report));
   applyColumnNumberFormat(worksheet, 4, '#,##0');
-  applyColumnNumberFormat(worksheet, 5, '0');
+  applyColumnNumberFormat(worksheet, 5, '#,##0');
   applyColumnNumberFormat(worksheet, 6, '0');
   applyColumnNumberFormat(worksheet, 7, '0');
-  applyColumnNumberFormat(worksheet, 8, '0.00');
-  applyColumnNumberFormat(worksheet, 9, '#,##0');
-  applyColumnNumberFormat(worksheet, 10, '0');
+  applyColumnNumberFormat(worksheet, 8, '0');
+  applyColumnNumberFormat(worksheet, 9, '0.00');
+  applyColumnNumberFormat(worksheet, 10, '#,##0');
+  applyColumnNumberFormat(worksheet, 11, '0');
 
   return worksheet;
 }

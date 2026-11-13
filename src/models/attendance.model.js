@@ -128,7 +128,19 @@ const attendanceSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    rawScore: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     bestStreak: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    // Academic best streak derived from the answer sequence in question order.
+    // `bestStreak` remains the gameplay streak (affected by Streak Shield).
+    academicBestStreak: {
       type: Number,
       default: 0,
       min: 0,

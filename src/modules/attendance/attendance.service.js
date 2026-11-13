@@ -149,22 +149,65 @@ function buildAnswerIndex(answers) {
   return { byParticipant, byQuestion };
 }
 
-function summarizeAnswers(answers) {
+function summarizeAnswers(session, answers) {
+  const questions = session.gameQuestions || [];
+  const answersByQuestion = new Map(
+    answers.map((answer) => [answer.question.toString(), answer])
+  );
+  const matchedQuestionIds = new Set();
   let correctCount = 0;
   let totalResponseTimeMs = 0;
+  let rawScore = 0;
+  let bestStreak = 0;
+  let currentStreak = 0;
 
-  for (const answer of answers) {
-    if (answer.isCorrect) {
-      correctCount += 1;
+  // Walk the question snapshot in session order so the academic best streak
+  // reflects the real answer sequence, not gameplay streak-shield behavior.
+  for (const question of questions) {
+    const questionId = question.question.toString();
+    const answer = answersByQuestion.get(questionId);
+
+    matchedQuestionIds.add(questionId);
+
+    if (!answer) {
+      // An unanswered question is not a correct answer, so it breaks the
+      // consecutive-correct run.
+      currentStreak = 0;
+      continue;
     }
 
     totalResponseTimeMs += answer.responseTimeMs || 0;
+
+    if (answer.isCorrect) {
+      correctCount += 1;
+      rawScore += question.points || 0;
+      currentStreak += 1;
+      bestStreak = Math.max(bestStreak, currentStreak);
+    } else {
+      currentStreak = 0;
+    }
+  }
+
+  // Defensive: answers for questions missing from the snapshot still count as
+  // answered so totals never drop below the persisted Answer records.
+  for (const answer of answers) {
+    if (matchedQuestionIds.has(answer.question.toString())) {
+      continue;
+    }
+
+    totalResponseTimeMs += answer.responseTimeMs || 0;
+
+    if (answer.isCorrect) {
+      correctCount += 1;
+    }
   }
 
   return {
     answeredCount: answers.length,
     correctCount,
     totalResponseTimeMs,
+    rawScore,
+    academicBestStreak: bestStreak,
   };
 }
 
@@ -206,7 +249,9 @@ function buildAttendanceRecord({
     correctCount: stats.correctCount,
     totalQuestions: session.gameQuestions?.length || 0,
     score: participant.score || 0,
+    rawScore: stats.rawScore || 0,
     bestStreak: participant.bestStreak || 0,
+    academicBestStreak: stats.academicBestStreak || 0,
     finalRank: participant.finalRank ?? null,
     totalResponseTimeMs: stats.totalResponseTimeMs,
     finalizedAt: now,
@@ -239,7 +284,9 @@ function buildAbsenteeRecord({ session, quiz, student, section, sectionName }) {
     correctCount: 0,
     totalQuestions: session.gameQuestions?.length || 0,
     score: 0,
+    rawScore: 0,
     bestStreak: 0,
+    academicBestStreak: 0,
     finalRank: null,
     totalResponseTimeMs: 0,
     finalizedAt: new Date(),
@@ -486,6 +533,7 @@ async function finalizeSessionAttendance(session, { force = false } = {}) {
       ? sectionsById.get(section.toString())?.name || ''
       : '';
     const stats = summarizeAnswers(
+      session,
       byParticipant.get(participant._id.toString()) || []
     );
     const status = computeAttendanceStatus({
@@ -615,6 +663,7 @@ async function buildLiveRecords(session, quiz) {
       ? sectionsById.get(section.toString())?.name || ''
       : '';
     const stats = summarizeAnswers(
+      session,
       byParticipant.get(participant._id.toString()) || []
     );
     const status = computeAttendanceStatus({
@@ -827,6 +876,7 @@ function buildStudentAnalysis(session, records, answersByParticipant) {
       (answer) => answer.isCorrect
     ).length;
     const accuracy = ratio(correctCount, answeredCount);
+    const academicStats = summarizeAnswers(session, participantAnswers);
     const followUpReasons = [];
 
     if (record.status === 'ABSENT') {
@@ -866,12 +916,19 @@ function buildStudentAnalysis(session, records, answersByParticipant) {
       accuracy,
       accuracyPercentage: percentage(correctCount, answeredCount),
       score: record.score,
+      gameScore: record.score || 0,
+      rawScore: academicStats.rawScore,
       finalRank: record.finalRank,
       bestStreak: record.bestStreak || 0,
+      academicBestStreak: academicStats.academicBestStreak,
       totalResponseTimeMs: record.totalResponseTimeMs,
       averageResponseTimeMs:
         answeredCount > 0
           ? Math.round(record.totalResponseTimeMs / answeredCount)
+          : 0,
+      averageResponseTime:
+        answeredCount > 0
+          ? round(academicStats.totalResponseTimeMs / answeredCount / 1000, 2)
           : 0,
       wrongQuestionCount: wrongQuestions.length,
       unansweredCount: unansweredQuestions.length,
@@ -881,6 +938,55 @@ function buildStudentAnalysis(session, records, answersByParticipant) {
       followUpReasons,
     };
   });
+}
+
+function buildStudentResults(studentAnalysis) {
+  return studentAnalysis.map((student) => ({
+    student: student.student,
+    participant: student.participant,
+    section: student.section,
+    sectionName: student.sectionName,
+    name: student.name,
+    nickname: student.nickname,
+    status: student.status,
+    guest: student.guest,
+    rosterMissing: student.rosterMissing,
+    late: student.late,
+    totalQuestions: student.totalQuestions,
+    rawScore: student.rawScore,
+    gameScore: student.gameScore,
+    accuracy: student.accuracyPercentage,
+    correctAnswers: student.correctCount,
+    incorrectAnswers: student.incorrectCount,
+    bestStreak: student.academicBestStreak,
+    averageResponseTime: student.averageResponseTime,
+    finalRank: student.finalRank,
+  }));
+}
+
+function buildReportSessionSummary(session, quiz, summary) {
+  return {
+    sessionId: session._id.toString(),
+    quizTitle: quiz?.title || '',
+    joinCode: session.joinCode,
+    status: session.status,
+    startedAt: session.startedAt || null,
+    endedAt: session.endedAt || null,
+    totalQuestions: session.gameQuestions?.length || 0,
+    totalParticipants: summary.counts.joined,
+    registeredParticipants: summary.counts.registered,
+    joinedParticipants: summary.counts.joined,
+    attendanceSummary: {
+      present: summary.counts.present,
+      absent: summary.counts.absent,
+      kicked: summary.counts.kicked,
+      pending: summary.counts.pending,
+      guests: summary.counts.guests,
+      late: summary.counts.late,
+      attendanceRate: summary.counts.attendanceRate,
+      attendancePercentage: summary.counts.attendancePercentage,
+    },
+  };
 }
 
 function buildCommandStats(commands, participantsById) {
@@ -1053,8 +1159,17 @@ async function getSessionReport(organizationId, sessionId) {
       averageResponseTimeMs: record.averageResponseTimeMs,
     }));
 
+  const studentAnalysis = buildStudentAnalysis(
+    session,
+    records,
+    byParticipant
+  );
+  const studentResults = buildStudentResults(studentAnalysis);
+  const commandStatistics = buildCommandStats(commands, participantsById);
+
   return {
     generatedAt: new Date(),
+    sessionSummary: buildReportSessionSummary(session, quiz, summary),
     session: buildSessionInfo(session, quiz),
     attendance: {
       finalized: true,
@@ -1102,12 +1217,10 @@ async function getSessionReport(organizationId, sessionId) {
         : null,
     },
     questionAnalysis,
-    studentAnalysis: buildStudentAnalysis(
-      session,
-      records,
-      byParticipant
-    ),
-    commands: buildCommandStats(commands, participantsById),
+    studentAnalysis,
+    studentResults,
+    commands: commandStatistics,
+    commandStatistics,
   };
 }
 

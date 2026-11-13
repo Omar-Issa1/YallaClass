@@ -50,6 +50,13 @@ const answerSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    // Full configured question points for a correct answer, zero otherwise.
+    // Unlike `basePointsAwarded`, this is not reduced by response speed.
+    rawScoreAwarded: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     doublePointsApplied: {
       type: Boolean,
       default: false,
